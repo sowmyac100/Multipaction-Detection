@@ -1,0 +1,117 @@
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+from tensorflow.keras import layers, models
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+import cv2
+import os
+import matplotlib.pyplot as plt
+
+# 1. Load and Preprocess Image Data (Thermal Images / Heatmaps)
+def load_images_from_folder(folder, img_size=(64, 64)):
+    images = []
+    labels = []  # 0 for normal, 1 for multipaction
+    for filename in os.listdir(folder):
+        img_path = os.path.join(folder, filename)
+        img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)  # Read in grayscale
+        if img is not None:
+            img_resized = cv2.resize(img, img_size)
+            images.append(img_resized)
+            # Assume filenames indicate the class (multipaction or not)
+            if 'multipaction' in filename:
+                labels.append(1)
+            else:
+                labels.append(0)
+    return np.array(images), np.array(labels)
+
+# 2. Load and Preprocess Tabular Data (Sensor Data)
+def load_tabular_data(file_path):
+    data = pd.read_csv(file_path)
+    X = data.drop(columns=['label'])  # Features
+    y = data['label']  # Labels (0 = normal, 1 = multipaction)
+    
+    # Standardize the tabular data
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    
+    return X_scaled, y
+
+# 3. Load Image Data and Tabular Data
+image_folder = 'path_to_image_data'
+tabular_file = 'path_to_tabular_data.csv'
+
+# Load image data (thermal images / heatmaps)
+image_data, image_labels = load_images_from_folder(image_folder)
+
+# Load tabular data (sensor data)
+tabular_data, tabular_labels = load_tabular_data(tabular_file)
+
+# 4. Preprocess Image Data
+image_data = image_data.astype('float32') / 255.0  # Normalize images
+image_data = np.expand_dims(image_data, axis=-1)  # Add channel dimension for grayscale
+
+# Split data into training and test sets
+X_train_images, X_test_images, y_train_images, y_test_images = train_test_split(image_data, image_labels, test_size=0.2, random_state=42)
+X_train_tabular, X_test_tabular, y_train_tabular, y_test_tabular = train_test_split(tabular_data, tabular_labels, test_size=0.2, random_state=42)
+
+# 5. Define CNN for Image Data
+cnn_model = models.Sequential([
+    layers.Conv2D(32, (3, 3), activation='relu', input_shape=(64, 64, 1)),
+    layers.MaxPooling2D((2, 2)),
+    layers.Conv2D(64, (3, 3), activation='relu'),
+    layers.MaxPooling2D((2, 2)),
+    layers.Conv2D(128, (3, 3), activation='relu'),
+    layers.MaxPooling2D((2, 2)),
+    layers.Flatten(),
+    layers.Dense(64, activation='relu'),
+    layers.Dense(1, activation='sigmoid')  # Binary classification
+])
+
+cnn_model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+
+# 6. Train CNN Model
+cnn_model.fit(X_train_images, y_train_images, epochs=10, batch_size=32, validation_data=(X_test_images, y_test_images))
+
+# 7. Define Random Forest for Tabular Data
+rf_model = RandomForestClassifier(n_estimators=100, random_state=42)
+
+# Train Random Forest Model
+rf_model.fit(X_train_tabular, y_train_tabular)
+
+# 8. Make Predictions Using Both Models
+image_predictions = cnn_model.predict(X_test_images)  # Predictions from CNN (Image data)
+tabular_predictions = rf_model.predict(X_test_tabular)  # Predictions from Random Forest (Tabular data)
+
+# 9. Combine Predictions Using Voting Classifier (Ensemble)
+# Convert CNN predictions to binary (0 or 1)
+image_predictions = (image_predictions > 0.5).astype(int)
+
+# Use Voting Classifier to combine the predictions from both models
+ensemble_model = VotingClassifier(estimators=[
+    ('cnn', cnn_model),
+    ('rf', rf_model)
+], voting='hard')
+
+# Prepare the combined dataset for the ensemble model
+X_test_combined = np.hstack([image_predictions.reshape(-1, 1), tabular_predictions.reshape(-1, 1)])
+
+# Train the ensemble model (just use the combined predictions for simplicity)
+ensemble_model.fit(X_test_combined, y_test_tabular)
+
+# 10. Final Predictions from Ensemble Model
+ensemble_predictions = ensemble_model.predict(X_test_combined)
+
+# 11. Evaluate Ensemble Model Performance
+ensemble_accuracy = np.mean(ensemble_predictions == y_test_tabular)
+print(f'Ensemble Model Accuracy: {ensemble_accuracy:.4f}')
+
+# 12. Visualize the Results
+# Example: Visualize a test image and its prediction
+sample_image = X_test_images[0]
+sample_image_label = y_test_images[0]
+
+plt.imshow(sample_image.squeeze(), cmap='gray')
+plt.title(f"True Label: {sample_image_label}, Predicted: {ensemble_predictions[0]}")
+plt.show()
